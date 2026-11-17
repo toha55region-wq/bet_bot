@@ -9,27 +9,25 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from tavily import TavilyClient
 from groq import Groq
 
 # Загружаем переменные окружения
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip().strip('"').strip("'")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip().strip('"').strip("'")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip().strip('"').strip("'")
 
 # Инициализация клиентов
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 groq_client = Groq(
     api_key=GROQ_API_KEY,
     http_client=httpx.Client()
 )
 
-# Хранилище выбранных видов спорта для пользователей
+# Хранилище выбранных видов спорта и рабочей модели ИИ
 user_sports = {}
+ACTIVE_GROQ_MODEL = None
 
 # Клавиатура с видами спорта
 sport_keyboard = ReplyKeyboardMarkup(
@@ -61,12 +59,74 @@ def clean_html(raw_html: str) -> str:
     return html.unescape(re.sub(r"\s+", " ", clean)).strip()
 
 
+async def call_groq_ai(messages: list, max_tokens: int = 1500) -> str:
+    """Умный вызов Groq: сам находит рабочую модель на аккаунте пользователя"""
+    global ACTIVE_GROQ_MODEL
+
+    # Список приоритетных моделей (от самых умных к базовым)
+    preferred_models = [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "meta-llama/llama-4-maverick-17b-128e-instruct",
+        "meta-llama/llama-4-scout-17b-16e-instruct",
+        "qwen/qwen3-32b",
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+    ]
+
+    # Получаем реальный список моделей, доступных на аккаунте
+    try:
+        models_list = await asyncio.to_thread(groq_client.models.list)
+        available_ids = [
+            m.id for m in models_list.data
+            if not any(skip in m.id.lower() for skip in ["whisper", "tts", "guard", "embed", "playai", "orpheus"])
+        ]
+    except Exception:
+        available_ids = []
+
+    # Собираем очередь моделей для проверки
+    candidates = []
+    if ACTIVE_GROQ_MODEL:
+        candidates.append(ACTIVE_GROQ_MODEL)
+    for pm in preferred_models:
+        if pm in available_ids and pm not in candidates:
+            candidates.append(pm)
+    for pm in preferred_models:
+        if pm not in candidates:
+            candidates.append(pm)
+    for aid in available_ids:
+        if aid not in candidates:
+            candidates.append(aid)
+
+    last_error = ""
+    for model_id in candidates:
+        try:
+            resp = await asyncio.to_thread(
+                groq_client.chat.completions.create,
+                model=model_id,
+                messages=messages,
+                temperature=0.5,
+                max_tokens=max_tokens
+            )
+            text = resp.choices[0].message.content or ""
+            # Убираем скрытые теги размышлений <think>...</think>, если модель их выдает
+            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+            if text:
+                ACTIVE_GROQ_MODEL = model_id
+                print(f"[INFO] ✅ Использована модель Groq: {model_id}")
+                return text
+        except Exception as e:
+            last_error = str(e)
+            print(f"[WARN] Модель {model_id} не подошла: {last_error}")
+            continue
+
+    raise Exception(f"Не удалось вызвать модель Groq: {last_error}")
+
+
 async def build_english_query(match_name: str, sport: str) -> str:
     """Переводит название матча на английский для мирового поиска"""
     try:
-        resp = await asyncio.to_thread(
-            groq_client.chat.completions.create,
-            model="llama-3.3-70b-versatile",
+        res = await call_groq_ai(
             messages=[
                 {
                     "role": "system",
@@ -74,23 +134,22 @@ async def build_english_query(match_name: str, sport: str) -> str:
                 },
                 {"role": "user", "content": f"{sport}: {match_name}"}
             ],
-            temperature=0.2,
-            max_tokens=30
+            max_tokens=50
         )
-        return resp.choices[0].message.content.strip()
+        return res.strip()
     except Exception:
         return f"{match_name} {sport}"
 
 
 async def google_and_ddg_search(query: str, lang: str = "ru") -> str:
-    """Бесплатный и безотказный поиск через Google News RSS и DuckDuckGo (без ключей и ошибок 403)"""
+    """Бесплатный и безотказный поиск через Google News RSS и DuckDuckGo"""
     results_text = ""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     }
 
     async with httpx.AsyncClient(headers=headers, timeout=15.0, follow_redirects=True) as client:
-        # 1. Поиск свежих новостей и превью через Google News RSS
+        # 1. Поиск свежих новостей через Google News RSS
         try:
             encoded_q = urllib.parse.quote(query)
             if lang == "ru":
@@ -117,7 +176,7 @@ async def google_and_ddg_search(query: str, lang: str = "ru") -> str:
             if resp.status_code == 200:
                 snippets = re.findall(r'<a class="result__snippet"[^>]*>(.*?)</a>', resp.text, re.DOTALL)
                 for snippet in snippets[:5]:
-                     results_text += f"Сводка: {clean_html(snippet)}\n\n"
+                    results_text += f"Сводка: {clean_html(snippet)}\n\n"
         except Exception as e:
             print(f"[WARN] Ошибка DuckDuckGo: {e}")
 
@@ -125,38 +184,18 @@ async def google_and_ddg_search(query: str, lang: str = "ru") -> str:
 
 
 async def search_match_info(match_name: str, sport: str) -> str:
-    """Комбинированный поиск: пробует Tavily, а при ошибке 403 автоматически включает Google + DuckDuckGo"""
-    info = ""
-
-    # Попытка 1: Tavily (если не заблокирован)
-    if tavily_client:
-        try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    tavily_client.search,
-                    query=f"{match_name} {sport} прогноз статистика форма",
-                    search_depth="basic",
-                    max_results=5
-                ),
-                timeout=10.0
-            )
-            for result in response.get("results", []):
-                info += f"Заголовок: {result.get('title', '')}\nСодержание: {result.get('content', '')}\n\n"
-        except Exception as e:
-            print(f"[INFO] ⚠️ Tavily недоступен ({e}), переключаюсь на прямой поиск Google/DuckDuckGo...")
-
-    # Попытка 2: Прямой поиск Google + DuckDuckGo (на русском и английском)
+    """Двуязычный поиск информации о матче"""
     ru_info = await google_and_ddg_search(f"{match_name} {sport}", lang="ru")
     en_query = await build_english_query(match_name, sport)
     en_info = await google_and_ddg_search(f"{en_query} prediction stats", lang="en")
 
-    info += ru_info + en_info
+    info = ru_info + en_info
     print(f"[INFO] 📝 Собрано информации из сети: {len(info)} символов")
     return info if info.strip() else "Используй базовую спортивную статистику и исторические данные по этим командам/игрокам."
 
 
 async def generate_analysis(match_name: str, search_info: str, sport: str) -> str:
-    """Генерация аналитической сводки через Groq (Llama 3.3 70B)"""
+    """Генерация аналитической сводки через Groq"""
     try:
         if sport == "ММА":
             section_name = "🥊 Бой"
@@ -207,9 +246,7 @@ async def generate_analysis(match_name: str, search_info: str, sport: str) -> st
 ══════════════════════════
 """
 
-        response = await asyncio.to_thread(
-            groq_client.chat.completions.create,
-            model="llama-3.3-70b-versatile",
+        result = await call_groq_ai(
             messages=[
                 {
                     "role": "system",
@@ -217,11 +254,9 @@ async def generate_analysis(match_name: str, search_info: str, sport: str) -> st
                 },
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.5,
             max_tokens=1500
         )
-
-        return response.choices[0].message.content
+        return result
 
     except Exception as e:
         print(f"[ERROR] ❌ Ошибка Groq: {str(e)}")
@@ -298,7 +333,7 @@ async def handle_message(message: types.Message):
 
 
 async def main():
-    print("🚀 БОТ УСПЕШНО ЗАПУЩЕН (GOOGLE + DUCKDUCKGO ПОИСК АКТИВЕН)")
+    print("🚀 БОТ УСПЕШНО ЗАПУЩЕН (АВТОВЫБОР МОДЕЛИ GROQ ВКЛЮЧЕН)")
     await dp.start_polling(bot)
 
 
