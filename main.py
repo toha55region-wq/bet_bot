@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+import httpx
 from tavily import TavilyClient
 from groq import Groq
 
@@ -15,7 +16,10 @@ load_dotenv()
 bot = Bot(token=os.getenv("BOT_TOKEN"))
 dp = Dispatcher()
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+groq_client = Groq(
+    api_key=os.getenv("GROQ_API_KEY"),
+    http_client=httpx.Client()
+)
 
 # Хранилище выбранных видов спорта для пользователей
 user_sports = {}
