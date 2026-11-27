@@ -341,4 +341,96 @@ async def handle_message(message: types.Message):
     user_id = message.from_user.id
     text = (message.text or "").strip()
 
-    sports = 
+    sports = {
+        "⚽ Футбол": ("футбол", "Арсенал - Челси"),
+        "🏒 Хоккей": ("хоккей", "Северсталь - Сибирь"),
+        "🏐 Волейбол": ("волейбол", "Зенит - Динамо"),
+        "🎮 Киберспорт": ("киберспорт", "Team Spirit - Team Liquid"),
+        "🏀 Баскетбол": ("баскетбол", "Лейкерс - Уорриорз"),
+        "🎾 Теннис": ("теннис", "Джокович - Алькарас"),
+        "🥊 ММА": ("ММА", "Махачев - Царукян"),
+    }
+
+    # 1. Если нажата кнопка вида спорта
+    if text in sports:
+        selected_sport, example = sports[text]
+        user_sports[user_id] = selected_sport
+        await message.answer(
+            f"✅ Выбран вид спорта: {text}\n\n"
+            f"✍️ Напиши название матча (например: {example})\n"
+            f"🔗 Либо отправь ссылку на матч с сайта БК!"
+        )
+        return
+
+    # 2. Если пользователь отправил ССЫЛКУ на матч с сайта БК
+    url_match = re.search(r"https?://\S+", text)
+    if url_match:
+        url = url_match.group(0)
+        status_msg = await message.answer(
+            "🔗 Перехожу по ссылке букмекера и определяю матч..."
+        )
+        try:
+            parsed = await parse_bookmaker_link(url)
+            match_name = parsed["match_name"]
+            detected_sport = parsed["sport"]
+            extra_page_info = parsed["page_data"]
+
+            if match_name == "UNKNOWN" or len(match_name) < 3:
+                await status_msg.edit_text(
+                    "⚠️ Сайт букмекера скрыл название команд за внутренней защитой.\n"
+                    "Пожалуйста, напиши названия команд текстом (например: Команда 1 - Команда 2)!"
+                )
+                return
+
+            await status_msg.edit_text(
+                f"✅ Матч распознан: {match_name} ({detected_sport})\n"
+                f"📰 Собираю статистику, дату и новости..."
+            )
+            search_info = await search_match_info(
+                match_name, detected_sport, extra_page_info
+            )
+            await status_msg.edit_text("🤖 Формирую аналитическую сводку...")
+            analysis = await generate_analysis(
+                match_name, search_info, detected_sport
+            )
+            await status_msg.edit_text("✅ Готово!")
+            await message.answer(analysis)
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Ошибка при разборе ссылки: {str(e)}")
+        return
+
+    # 3. Если обычный текст, но вид спорта ещё не выбран
+    if user_sports.get(user_id) is None:
+        await message.answer(
+            "⚠️ Сначала выбери вид спорта кнопками ниже (или просто пришли ссылку на матч с сайта БК)!",
+            reply_markup=sport_keyboard,
+        )
+        return
+
+    # 4. Стандартный поиск по названию матча
+    match_name = text
+    selected_sport = user_sports[user_id]
+
+    status_msg = await message.answer(
+        f"🔍 Ищу расписание и данные: {match_name} ({selected_sport})..."
+    )
+
+    try:
+        search_info = await search_match_info(match_name, selected_sport)
+        await status_msg.edit_text("🤖 Формирую аналитическую сводку...")
+        analysis = await generate_analysis(
+            match_name, search_info, selected_sport
+        )
+        await status_msg.edit_text("✅ Готово!")
+        await message.answer(analysis)
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Произошла ошибка: {str(e)}")
+
+
+async def main():
+    print("🚀 БОТ ЗАПУЩЕН И ГОТОВ К РАБОТЕ")
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
