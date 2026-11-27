@@ -15,7 +15,7 @@ load_dotenv()
 # Инициализация клиентов
 bot = Bot(token=os.getenv("BOT_TOKEN"))
 dp = Dispatcher()
-tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+tavily_client = TavilyClient(api_key=os.getenv("tvly-4Wm6cv-Vqaem0vs8Q6dNEa2Q8hqFpm4Wrlr3VKvGupmGAQEih"))
 groq_client = Groq(
     api_key=os.getenv("GROQ_API_KEY"), http_client=httpx.Client()
 )
