@@ -15,7 +15,7 @@ load_dotenv()
 bot = Bot(token=os.getenv("BOT_TOKEN"))
 dp = Dispatcher()
 tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"), proxies={})
 
 # Хранилище выбранных видов спорта для пользователей
 user_sports = {}
