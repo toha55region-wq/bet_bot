@@ -1,6 +1,9 @@
 import asyncio
-from datetime import datetime
+import html
 import os
+import re
+import urllib.parse
+import xml.etree.ElementTree as ET
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
@@ -15,9 +18,13 @@ load_dotenv()
 # Инициализация клиентов
 bot = Bot(token=os.getenv("BOT_TOKEN"))
 dp = Dispatcher()
-tavily_client = TavilyClient(api_key=os.getenv("tvly-4Wm6cv-Vqaem0vs8Q6dNEa2Q8hqFpm4Wrlr3VKvGupmGAQEih"))
+
+tavily_key = (os.getenv("TAVILY_API_KEY") or "").strip()
+tavily_client = TavilyClient(api_key=tavily_key) if tavily_key else None
+
 groq_client = Groq(
-    api_key=os.getenv("GROQ_API_KEY"), http_client=httpx.Client()
+    api_key=(os.getenv("GROQ_API_KEY") or "").strip(),
+    http_client=httpx.Client(),
 )
 
 # Хранилище выбранных видов спорта для пользователей
@@ -47,34 +54,90 @@ sport_keyboard = ReplyKeyboardMarkup(
 )
 
 
-async def search_match_info(match_name: str, sport: str) -> str:
-    """Поиск информации о матче через Tavily"""
-    try:
-        print(f"[INFO] 🔍 Поиск информации о матче: {match_name} ({sport})")
-        print(f"[INFO] 📡 Отправка запроса в Tavily API...")
-
-        # ИСПРАВЛЕНО: убран topic="news" (он не ищет на русском) и оптимизирован запрос
-        response = tavily_client.search(
-            query=f"{sport} {match_name} прогноз статистика форма обзор матча",
-            search_depth="basic",
-            max_results=5,
-            include_raw_content=False,
+async def fallback_free_search(match_name: str, sport: str) -> str:
+    """Резервный бесплатный поиск (Google News + Bing), если Tavily заблокирован (403)"""
+    print(f"[INFO] 🔄 Запуск резервного поиска для: {match_name} ({sport})")
+    info = ""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         )
+    }
 
-        results = response.get("results", [])
-        print(f"[INFO] ✅ Получено {len(results)} результатов от Tavily")
+    queries = [f"{match_name} {sport} прогноз обзор", f"{match_name} {sport}"]
 
-        info = ""
-        for result in results:
-            info += f"Заголовок: {result.get('title', '')}\n"
-            info += f"Содержание: {result.get('content', '')}\n"
-            info += f"URL: {result.get('url', '')}\n\n"
+    async with httpx.AsyncClient(
+        headers=headers, follow_redirects=True, timeout=15.0
+    ) as client:
+        # 1. Ищем свежие новости через Google News RSS
+        for q in queries:
+            if len(info) > 1500:
+                break
+            try:
+                encoded_q = urllib.parse.quote(q)
+                url = f"https://news.google.com/rss/search?q={encoded_q}&hl=ru&gl=RU&ceid=RU:ru"
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    root = ET.fromstring(resp.text)
+                    for item in root.findall(".//item")[:6]:
+                        title = item.findtext("title", "")
+                        pub_date = item.findtext("pubDate", "")
+                        raw_desc = html.unescape(
+                            item.findtext("description", "")
+                        )
+                        desc = re.sub(r"<[^>]+>", "", raw_desc)
+                        info += f"Новость: {title} ({pub_date})\nОписание: {desc}\n\n"
+            except Exception as e:
+                print(f"[WARNING] Ошибка Google RSS: {e}")
 
-        print(f"[INFO] 📝 Собрано информации: {len(info)} символов")
-        return info if info.strip() else "Информация не найдена"
-    except Exception as e:
-        print(f"[ERROR] ❌ Ошибка при поиске: {str(e)}")
-        return f"ERROR_TAVILY: {str(e)}"
+        # 2. Дополняем данными через Bing RSS
+        try:
+            encoded_q = urllib.parse.quote(
+                f"{sport} {match_name} прогноз статистика форма"
+            )
+            bing_url = f"https://www.bing.com/search?q={encoded_q}&format=rss"
+            resp = await client.get(bing_url)
+            if resp.status_code == 200:
+                root = ET.fromstring(resp.text)
+                for item in root.findall(".//item")[:5]:
+                    title = item.findtext("title", "")
+                    desc = item.findtext("description", "")
+                    info += f"Заголовок: {title}\nСодержание: {desc}\n\n"
+        except Exception as e:
+            print(f"[WARNING] Ошибка Bing RSS: {e}")
+
+    print(f"[INFO] ✅ Резервный поиск собрал: {len(info)} символов")
+    return info
+
+
+async def search_match_info(match_name: str, sport: str) -> str:
+    """Поиск информации о матче (Tavily + автоматический резервный поиск)"""
+    info = ""
+
+    # Попытка 1: Пробуем Tavily
+    if tavily_client:
+        try:
+            print(f"[INFO] 🔍 Поиск в Tavily: {match_name} ({sport})")
+            response = tavily_client.search(
+                query=f"{sport} {match_name} прогноз статистика форма обзор",
+                search_depth="basic",
+                max_results=5,
+                include_raw_content=False,
+            )
+            for result in response.get("results", []):
+                info += f"Заголовок: {result.get('title', '')}\n"
+                info += f"Содержание: {result.get('content', '')}\n\n"
+        except Exception as e:
+            print(
+                f"[WARNING] ⚠️ Tavily недоступен ({str(e)}). Переключаюсь на резервный поиск..."
+            )
+
+    # Попытка 2: Если Tavily выдал ошибку 403 или ничего не нашёл — включаем резервный поиск
+    if len(info.strip()) < 100:
+        info = await fallback_free_search(match_name, sport)
+
+    return info if info.strip() else "Свежих новостей в ленте мало, используй общую статистику команд."
 
 
 async def generate_analysis(
@@ -84,42 +147,47 @@ async def generate_analysis(
     if sport == "ММА":
         section_name = "🥊 **Бой**"
         form_section = """📊 **Анализ бойцов**:
-- Боец 1: [анализ формы, стиль, победы/поражения]
-- Боец 2: [анализ формы, стиль, победы/поражения]"""
-        injuries_section = """🤕 **Травмы и состояние**:
-- [состояние бойцов, возможные травмы]"""
+- Боец 1: [анализ формы, стиль, сильные стороны]
+- Боец 2: [анализ формы, стиль, сильные стороны]"""
+        injuries_section = """🤕 **Состояние и весогонка**:
+- [состояние бойцов, форма перед боем]"""
     else:
         section_name = "🏆 **Матч**"
         form_section = """📊 **Анализ формы команд**:
-- Команда 1: [анализ]
-- Команда 2: [анализ]"""
-        injuries_section = """🤕 **Травмы и дисквалификации**:
-- [список травмированных игроков]"""
+- Команда 1: [анализ текущей игры]
+- Команда 2: [анализ текущей игры]"""
+        injuries_section = """🤕 **Кадровые потери и состав**:
+- [информация о составах и травмах]"""
 
     prompt = f"""
-Проанализируй информацию о матче/бое "{match_name}" ({sport}) и создай краткую аналитическую сводку.
-Найденная информация:
+Проанализируй матч/бой "{match_name}" ({sport}) и создай аналитическую сводку для ставок.
+Найденная информация из интернета:
 {search_info}
+
+Если в найденной информации каких-то деталей не хватает, дополни анализ на основе своих знаний об этих командах/спортсменах и их статистике личных встреч.
+
 Создай структурированный ответ на русском языке:
 ═══════════════════════════════════════
 {section_name}: {match_name}
 ═══════════════════════════════════════
-📅 Дата: [укажи дату если есть]
 🏅 Вид спорта: {sport}
-📊 Анализ формы:
+
 {form_section}
-🤕 Травмы и состояние:
+
 {injuries_section}
-📰 Свежие новости:
-• [краткие новости]
+
+📰 Сводка и контекст матча:
+• [ключевые факты и новости]
+
 🎯 Прогноз экспертов:
-[твой прогноз на основе данных]
+[развернутый прогноз и варианты ставок]
+
 ⚠️ Важные факторы:
-• [ключевые факторы]
-Важно: Пиши кратко, без повторов, по существу.
+• [на что обратить внимание]
+
+Важно: Пиши кратко, уверенно, без повторов, по существу.
 """
 
-    # Список моделей: если первая недоступна (ошибка 404), бот сам возьмет следующую
     models_to_try = [
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
@@ -138,7 +206,7 @@ async def generate_analysis(
                 messages=[
                     {
                         "role": "system",
-                        "content": "Ты - спортивный аналитик. Пиши кратко на русском языке, без повторов. Используй эмодзи.",
+                        "content": "Ты — профессиональный спортивный аналитик. Пиши информативно на русском языке, используй эмодзи.",
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -152,9 +220,7 @@ async def generate_analysis(
             return result
         except Exception as e:
             last_error = str(e)
-            print(
-                f"[WARNING] ⚠️ Модель {model_name} не сработала: {last_error}. Пробую следующую..."
-            )
+            print(f"[WARNING] ⚠️ Модель {model_name} не сработала: {last_error}")
 
     return f"Ошибка при генерации анализа: {last_error}"
 
@@ -168,10 +234,9 @@ async def cmd_start(message: types.Message):
         "👋 Привет! Я бот для аналитики спортивных матчей и боёв.\n\n"
         "📌 Сначала выбери вид спорта с помощью кнопок ниже, "
         'затем отправь название матча или боя (например: "Арсенал - Челси" или "Конор Макгрегор - Хабиб Нурмагомедов").\n\n'
-        "⚡ Я проанализирую свежие новости, травмы, форму и сделаю прогноз для ставок!",
+        "⚡ Я проанализирую свежие новости, форму и сделаю прогноз для ставок!",
         reply_markup=sport_keyboard,
     )
-    print(f"[INFO] 👤 Пользователь {user_id} запустил бота")
 
 
 @dp.message()
@@ -179,7 +244,6 @@ async def handle_message(message: types.Message):
     """Обработчик всех сообщений"""
     user_id = message.from_user.id
     text = message.text
-    print(f"[DEBUG] 📨 Получено сообщение от {user_id}: '{text}'")
 
     sports = {
         "⚽ Футбол": ("футбол", "Арсенал - Челси"),
@@ -194,9 +258,6 @@ async def handle_message(message: types.Message):
     if text in sports:
         selected_sport, example = sports[text]
         user_sports[user_id] = selected_sport
-        print(
-            f"[INFO] 🎯 Пользователь {user_id} выбрал вид спорта: {selected_sport}"
-        )
         await message.answer(
             f"✅ Выбран вид спорта: {text}\n\n"
             f'📌 Теперь отправь название матча/боя (например: "{example}")'
@@ -212,7 +273,6 @@ async def handle_message(message: types.Message):
 
     match_name = text
     selected_sport = user_sports[user_id]
-    print(f"[INFO] 📨 Получен запрос: {selected_sport} - {match_name}")
 
     status_message = await message.answer(
         f"🔍 Ищу информацию о матче: {match_name} ({selected_sport})...\n"
@@ -220,40 +280,16 @@ async def handle_message(message: types.Message):
     )
 
     try:
-        await status_message.edit_text("📰 Поиск новостей и информации...")
+        await status_message.edit_text("📰 Поиск новостей и статистики...")
         search_info = await search_match_info(match_name, selected_sport)
-
-        # Если проблема с ключом Tavily — покажем реальную ошибку
-        if search_info.startswith("ERROR_TAVILY:"):
-            await status_message.edit_text(
-                f"❌ Ошибка поисковика Tavily (проверьте TAVILY_API_KEY):\n{search_info}"
-            )
-            return
-
-        if "Информация не найдена" in search_info or len(search_info) < 50:
-            await status_message.edit_text(
-                "😔 К сожалению, не удалось найти достаточно информации об этом матче.\n"
-                "Попробуй:\n"
-                "• Проверить правильность названия команды\n"
-                "• Указать более точное название матча\n"
-                "• Попробовать другой матч"
-            )
-            return
 
         await status_message.edit_text("🤖 Генерация аналитической сводки...")
         analysis = await generate_analysis(
             match_name, search_info, selected_sport
         )
 
-        if not analysis or len(analysis.strip()) == 0:
-            await status_message.edit_text(
-                "❌ Не удалось сгенерировать анализ. Попробуйте другой запрос."
-            )
-            return
-
         await status_message.edit_text("✅ Готово!")
         await message.answer(analysis)
-        print(f"[INFO] ✅ Успешно! Ответ отправлен пользователю {user_id}")
     except Exception as e:
         print(f"[ERROR] ❌ Ошибка в обработчике: {str(e)}")
         await status_message.edit_text(
@@ -263,9 +299,7 @@ async def handle_message(message: types.Message):
 
 async def main():
     """Запуск бота"""
-    print("=" * 60)
     print("🚀 ЗАПУСК БОТА ДЛЯ АНАЛИТИКИ СПОРТИВНЫХ МАТЧЕЙ")
-    print("=" * 60)
     await dp.start_polling(bot)
 
 
