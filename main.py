@@ -55,17 +55,12 @@ async def search_match_info(match_name: str, sport: str) -> str:
 
         print(f"[INFO] 📡 Отправка запроса в Tavily API...")
 
-        # Добавляем таймаут с asyncio.wait_for
-        response = await asyncio.wait_for(
-            asyncio.to_thread(
-                tavily_client.search,
-                query=f"{sport} {match_name} новости травмы форма команды прогнозы экспертов ставки",
-                search_depth="basic",  # Поменяли на basic для скорости
-                max_results=5,  # Уменьшили с 10 до 5
-                include_raw_content=False,  # Убрали raw content для скорости
-                topic="news"
-            ),
-            timeout=30.0  # Таймаут 30 секунд
+        response = tavily_client.search(
+            query=f"{sport} {match_name} новости травмы форма команды прогнозы экспертов ставки",
+            search_depth="basic",
+            max_results=5,
+            include_raw_content=False,
+            topic="news"
         )
 
         results_count = len(response.get("results", []))
@@ -80,9 +75,6 @@ async def search_match_info(match_name: str, sport: str) -> str:
 
         print(f"[INFO] 📝 Собрано информации: {len(info)} символов")
         return info if info else "Информация не найдена"
-    except asyncio.TimeoutError:
-        print(f"[ERROR] ❌ Таймаут Tavily API (более 30 секунд)")
-        return "Ошибка при поиске: Превышено время ожидания ответа от поисковика. Попробуйте позже."
     except Exception as e:
         print(f"[ERROR] ❌ Ошибка при поиске: {str(e)}")
         return f"Ошибка при поиске: {str(e)}"
@@ -133,13 +125,13 @@ async def generate_analysis(match_name: str, search_info: str, sport: str) -> st
 📰 Свежие новости:
 • [краткие новости]
 
-🎯 Прогноз:
+🎯 Прогноз экспертов:
 [твой прогноз на основе данных]
 
 ⚠️ Важные факторы:
 • [ключевые факторы]
 
-Важно: Не повторяй один и тот же текст. Пиши кратко и по делу.
+Важно: Пиши кратко, без повторов, по существу.
 """
 
         print(f"[INFO] 📤 Отправка запроса в Groq (модель: openai/gpt-oss-20b)...")
@@ -147,20 +139,15 @@ async def generate_analysis(match_name: str, search_info: str, sport: str) -> st
         response = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=[
-                {"role": "system", "content": "Ты - спортивный аналитик. Пиши кратко, без повторов, на русском языке. Не зацикливайся на одних и тех же фразах."},
+                {"role": "system", "content": "Ты - спортивный аналитик. Пиши кратко на русском языке, без повторов. Используй эмодзи."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.5,  # Снизил чтобы уменьшить зацикливание
-            max_tokens=1000  # Уменьшил для краткости
+            temperature=0.5,
+            max_tokens=1000
         )
 
         result = response.choices[0].message.content
         print(f"[INFO] ✅ Анализ сгенерирован: {len(result)} символов")
-
-        # Проверка на зацикливание
-        if len(result) > 2000:
-            print(f"[WARNING] ⚠️ Ответ слишком длинный, возможно зацикливание")
-            result = result[:2000] + "\n\n[ответ обрезан из-за длины]"
 
         return result
     except Exception as e:
@@ -172,7 +159,7 @@ async def generate_analysis(match_name: str, search_info: str, sport: str) -> st
 async def cmd_start(message: types.Message):
     """Обработчик команды /start"""
     user_id = message.from_user.id
-    user_sports[user_id] = None  # Сбрасываем выбор вида спорта
+    user_sports[user_id] = None
 
     await message.answer(
         "👋 Привет! Я бот для аналитики спортивных матчей и боёв.\n\n"
@@ -191,8 +178,7 @@ async def handle_message(message: types.Message):
     user_id = message.from_user.id
     text = message.text
 
-    print(f"[DEBUG] 📨 Получено сообщение от {user_id}: '{text}' (длина: {len(text)})")
-    print(f"[DEBUG] Текущий выбранный спорт для пользователя: {user_sports.get(user_id)}")
+    print(f"[DEBUG] 📨 Получено сообщение от {user_id}: '{text}'")
 
     # Список видов спорта из кнопок с примерами
     sports = {
@@ -231,20 +217,17 @@ async def handle_message(message: types.Message):
 
     print(f"[INFO] 📨 Получен запрос: {selected_sport} - {match_name}")
 
-    # Отправляем сообщение о начале поиска
     status_message = await message.answer(
         f"🔍 Ищу информацию о матче: {match_name} ({selected_sport})...\n"
         f"⏳ Это может занять 15-30 секунд."
     )
 
     try:
-        # Шаг 1: Поиск информации через Tavily
-        print(f"[INFO] 📰 Шаг 1/3: Поиск новостей и информации...")
+        # Поиск информации через Tavily
         await status_message.edit_text("📰 Поиск новостей и информации...")
         search_info = await search_match_info(match_name, selected_sport)
 
         if "Информация не найдена" in search_info or len(search_info) < 100:
-            print(f"[INFO] ⚠️ Информация не найдена")
             await status_message.edit_text(
                 "😔 К сожалению, не удалось найти достаточно информации об этом матче.\n"
                 "Попробуй:\n"
@@ -254,19 +237,15 @@ async def handle_message(message: types.Message):
             )
             return
 
-        # Шаг 2: Генерация анализа через Groq
-        print(f"[INFO] 🤖 Шаг 2/3: Генерация аналитической сводки...")
+        # Генерация анализа через Groq
         await status_message.edit_text("🤖 Генерация аналитической сводки...")
         analysis = await generate_analysis(match_name, search_info, selected_sport)
 
-        # Проверяем, что анализ не пустой
         if not analysis or len(analysis.strip()) == 0:
-            print(f"[INFO] ❌ Анализ пустой")
             await status_message.edit_text("❌ Не удалось сгенерировать анализ. Попробуйте другой запрос.")
             return
 
-        # Шаг 3: Отправка результата
-        print(f"[INFO] 📤 Шаг 3/3: Отправка результата пользователю...")
+        # Отправка результата
         await status_message.edit_text("✅ Готово!")
         await message.answer(analysis)
 
@@ -282,18 +261,6 @@ async def main():
     print("=" * 60)
     print("🚀 ЗАПУСК БОТА ДЛЯ АНАЛИТИКИ СПОРТИВНЫХ МАТЧЕЙ")
     print("=" * 60)
-
-    # Показываем список моделей Groq
-    print("\n📋 Получение списка моделей Groq...")
-    try:
-        models = groq_client.models.list()
-        print(f"\n✅ Доступные модели в Groq (всего {len(models.data)}):")
-        print("-" * 60)
-        for model in models.data:
-            print(f"  • {model.id}")
-        print("-" * 60)
-    except Exception as e:
-        print(f"\n❌ Не удалось получить список моделей: {e}")
 
     print("\n🤖 Бот готов к работе! Ожидаю сообщения...\n")
     print("=" * 60)
