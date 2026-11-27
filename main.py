@@ -105,7 +105,6 @@ def ask_groq(system_msg: str, user_msg: str, max_tok: int = 1800) -> str:
 
 
 async def parse_bookmaker_link(url: str) -> dict:
-    """Извлекает название матча, вид спорта и данные со страницы БК по ссылке"""
     print(f"[INFO] 🔗 Разбор ссылки: {url}")
     page_data = ""
     headers = {
@@ -116,14 +115,12 @@ async def parse_bookmaker_link(url: str) -> dict:
     }
 
     parsed_url = urllib.parse.urlparse(url)
-    url_words = urllib.parse.unquote(parsed_url.path).replace("-", " ").replace(
-        "_", " "
-    ).replace("/", " ")
+    url_words = urllib.parse.unquote(parsed_url.path)
+    url_words = url_words.replace("-", " ").replace("_", " ").replace("/", " ")
 
     async with httpx.AsyncClient(
         headers=headers, follow_redirects=True, timeout=15.0
     ) as client:
-        # 1. Прямой запрос к странице (читаем заголовки и мета-теги)
         try:
             resp = await client.get(url)
             if resp.status_code == 200:
@@ -147,7 +144,6 @@ async def parse_bookmaker_link(url: str) -> dict:
         except Exception as e:
             print(f"[WARN] Прямое чтение ссылки: {e}")
 
-        # 2. Чтение через облачный рендер Jina (пробивает JS-сайты букмекеров)
         try:
             jina_url = f"https://r.jina.ai/{url}"
             j_resp = await client.get(jina_url, timeout=12.0)
@@ -158,14 +154,14 @@ async def parse_bookmaker_link(url: str) -> dict:
             print(f"[WARN] Jina рендер: {e}")
 
     prompt = (
-        f"Пользователь прислал ссылку на матч с сайта букмекера:\n"
+        "Пользователь прислал ссылку на матч с сайта букмекера:\n"
         f"Ссылка: {url}\n"
         f"Слова из адреса ссылки: {url_words}\n"
         f"{page_data}\n\n"
         "Определи, какой это матч/бой и какой вид спорта.\n"
         "Переведи названия команд или фамилии спортсменов на русский язык.\n"
         "Ответь СТРОГО в две строки (без лишнего текста):\n"
-        "МАТЧ: [Команда 1 - Команда 2] (или UNKNOWN, если данных совсем нет)\n"
+        "МАТЧ: [Команда 1 - Команда 2] (или UNKNOWN, если данных нет)\n"
         "СПОРТ: [футбол / хоккей / баскетбол / теннис / волейбол / киберспорт / ММА]"
     )
 
@@ -217,7 +213,9 @@ async def fallback_free_search(match_name: str, sport: str) -> str:
                         pub = item.findtext("pubDate", "")
                         raw_d = html.unescape(item.findtext("description", ""))
                         desc = re.sub(r"<[^>]+>", "", raw_d)
-                        info += f"Новость: {title} (Опубликовано: {pub})\n{desc}\n\n"
+                        info += (
+                            f"Новость: {title} (Дата: {pub})\n{desc}\n\n"
+                        )
             except Exception as e:
                 print(f"[WARN] Google RSS: {e}")
 
@@ -246,13 +244,16 @@ async def search_match_info(
     if tavily_client:
         try:
             q_str = (
-                f"{sport} {match_name} дата время матча прогноз статистика форма"
+                f"{sport} {match_name} дата время матча прогноз статистика"
             )
             resp = tavily_client.search(
                 query=q_str, search_depth="basic", max_results=5
             )
             for r in resp.get("results", []):
-                info += f"Заголовок: {r.get('title', '')}\n{r.get('content', '')}\n\n"
+                info += (
+                    f"Заголовок: {r.get('title', '')}\n"
+                    f"{r.get('content', '')}\n\n"
+                )
         except Exception as e:
             print(f"[WARN] Tavily ошибка: {e}")
 
@@ -275,7 +276,10 @@ async def generate_analysis(
             "🔹 Боец 1: [актуальная форма, рекорд, сильные стороны]\n"
             "🔸 Боец 2: [актуальная форма, рекорд, сильные стороны]"
         )
-        roster_block = "🤕 СОСТОЯНИЕ И ЛАГЕРЬ:\n• [весогонка, травмы, готовность]"
+        roster_block = (
+            "🤕 СОСТОЯНИЕ И ЛАГЕРЬ:\n"
+            "• [весогонка, травмы, готовность]"
+        )
     else:
         header_icon = "🏆 МАТЧ"
         form_block = (
@@ -283,15 +287,17 @@ async def generate_analysis(
             "🔹 Команда 1: [результаты последних игр, стиль, форма]\n"
             "🔸 Команда 2: [результаты последних игр, стиль, форма]"
         )
-        roster_block = "🤕 СОСТАВЫ И ПОТЕРИ:\n• [травмы, дисквалификации, лидеры]"
+        roster_block = (
+            "🤕 СОСТАВЫ И ПОТЕРИ:\n"
+            "• [травмы, дисквалификации, лидеры]"
+        )
 
     prompt = (
         f"Сегодняшняя дата: {now_msk}.\n"
-        f"Проанализируй событие '{match_name}' ({sport}) и создай профессиональную сводку.\n\n"
+        f"Проанализируй событие '{match_name}' ({sport}).\n\n"
         f"Найденная информация:\n{search_info}\n\n"
-        "Обязательно укажи дату и время начала матча/боя (по МСК) на основе данных "
-        "(если точное время неизвестно, укажи ориентировочную дату проведения).\n"
-        "Оформи ответ СТРОГО по этой красивой структуре на русском языке:\n\n"
+        "Обязательно укажи дату и время начала матча/боя (по МСК).\n"
+        "Оформи ответ СТРОГО по этой структуре на русском языке:\n\n"
         "══════════════════════════\n"
         f"{header_icon}: {match_name}\n"
         "══════════════════════════\n"
@@ -326,14 +332,27 @@ async def generate_analysis(
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     user_sports[user_id] = None
-    text_msg = (
-        "👋 Привет! Я ИИ-бот для спортивной аналитики и прогнозов.\n\n"
-        "📌 Как мной пользоваться (2 способа):\n"
-        "1️⃣ Выбери вид спорта кнопкой ниже и напиши матч (например: Северсталь - Сибирь).\n"
-        "2️⃣ Или просто вставь прямую ССЫЛКУ на матч с сайта любого букмекера "
-        "(Fonbet, BetBoom, Winline, Pari, 1xBet, Flashscore и др.) — я сам распознаю игру и сделаю разбор!"
+    welcome_text = (
+        "👋 Привет! Я ИИ-бот для спортивной аналитики и прогнозов.\n"
+        "══════════════════════════\n"
+        "🚀 КАК МНОЙ ПОЛЬЗОВАТЬСЯ (2 СПОСОБА):\n\n"
+        "1️⃣ ПО НАЗВАНИЮ МАТЧА:\n"
+        "• Выбери вид спорта кнопкой в меню ниже 👇\n"
+        "• Напиши команды или бойцов (например: Северсталь - Сибирь)\n\n"
+        "2️⃣ ПО ССЫЛКЕ С САЙТА БУКМЕКЕРА 🔗:\n"
+        "• Просто скопируй и отправь мне прямую ссылку на матч "
+        "с сайта любой БК (Fonbet, BetBoom, Winline, Pari, 1xBet, "
+        "Melbet, Flashscore и др.)!\n"
+        "• Я сам перейду по ссылке, распознаю реальную игру, "
+        "проверю статистику и выдам готовый прогноз.\n"
+        "══════════════════════════\n"
+        "📊 Что входит в мой анализ:\n"
+        "✅ Точная дата и время матча (по МСК)\n"
+        "✅ Разбор формы, очных встреч (H2H) и травм\n"
+        "✅ Конкретный прогноз: основная ставка + тотал/фора\n\n"
+        "👇 Выбери вид спорта ниже или сразу пришли ссылку на матч!"
     )
-    await message.answer(text_msg, reply_markup=sport_keyboard)
+    await message.answer(welcome_text, reply_markup=sport_keyboard)
 
 
 @dp.message()
@@ -351,18 +370,16 @@ async def handle_message(message: types.Message):
         "🥊 ММА": ("ММА", "Махачев - Царукян"),
     }
 
-    # 1. Если нажата кнопка вида спорта
     if text in sports:
         selected_sport, example = sports[text]
         user_sports[user_id] = selected_sport
         await message.answer(
             f"✅ Выбран вид спорта: {text}\n\n"
             f"✍️ Напиши название матча (например: {example})\n"
-            f"🔗 Либо отправь ссылку на матч с сайта БК!"
+            "🔗 Либо просто отправь ссылку на матч с сайта любой БК!"
         )
         return
 
-    # 2. Если пользователь отправил ССЫЛКУ на матч с сайта БК
     url_match = re.search(r"https?://\S+", text)
     if url_match:
         url = url_match.group(0)
@@ -377,14 +394,14 @@ async def handle_message(message: types.Message):
 
             if match_name == "UNKNOWN" or len(match_name) < 3:
                 await status_msg.edit_text(
-                    "⚠️ Сайт букмекера скрыл название команд за внутренней защитой.\n"
-                    "Пожалуйста, напиши названия команд текстом (например: Команда 1 - Команда 2)!"
+                    "⚠️ Сайт букмекера скрыл названия команд за защитой.\n"
+                    "Пожалуйста, напиши матч текстом (Команда 1 - Команда 2)!"
                 )
                 return
 
             await status_msg.edit_text(
                 f"✅ Матч распознан: {match_name} ({detected_sport})\n"
-                f"📰 Собираю статистику, дату и новости..."
+                "📰 Собираю статистику, дату и новости..."
             )
             search_info = await search_match_info(
                 match_name, detected_sport, extra_page_info
@@ -396,18 +413,19 @@ async def handle_message(message: types.Message):
             await status_msg.edit_text("✅ Готово!")
             await message.answer(analysis)
         except Exception as e:
-            await status_msg.edit_text(f"❌ Ошибка при разборе ссылки: {str(e)}")
+            await status_msg.edit_text(
+                f"❌ Ошибка при разборе ссылки: {str(e)}"
+            )
         return
 
-    # 3. Если обычный текст, но вид спорта ещё не выбран
     if user_sports.get(user_id) is None:
         await message.answer(
-            "⚠️ Сначала выбери вид спорта кнопками ниже (или просто пришли ссылку на матч с сайта БК)!",
+            "⚠️ Сначала выбери вид спорта кнопками ниже "
+            "или просто отправь ссылку на матч с сайта БК!",
             reply_markup=sport_keyboard,
         )
         return
 
-    # 4. Стандартный поиск по названию матча
     match_name = text
     selected_sport = user_sports[user_id]
 
@@ -429,6 +447,17 @@ async def handle_message(message: types.Message):
 
 async def main():
     print("🚀 БОТ ЗАПУЩЕН И ГОТОВ К РАБОТЕ")
+    try:
+        await bot.set_my_description(
+            "🤖 ИИ-бот для аналитики спортивных матчей и боёв!\n\n"
+            "✅ Анализ по названию матча (Футбол, Хоккей, Теннис, ММА и др.)\n"
+            "🔗 Анализ по прямой ССЫЛКЕ с сайта любой букмекерской конторы\n"
+            "📅 Точная дата, время, форма команд, травмы и прогноз!\n\n"
+            "👇 Нажми «Начать», чтобы получить прогноз!"
+        )
+    except Exception as e:
+        print(f"[WARN] Не удалось обновить описание профиля: {e}")
+
     await dp.start_polling(bot)
 
 
