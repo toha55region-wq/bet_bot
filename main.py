@@ -115,7 +115,6 @@ async def search_match_info(match_name: str, sport: str) -> str:
     """Поиск информации о матче (Tavily + автоматический резервный поиск)"""
     info = ""
 
-    # Попытка 1: Пробуем Tavily
     if tavily_client:
         try:
             print(f"[INFO] 🔍 Поиск в Tavily: {match_name} ({sport})")
@@ -133,11 +132,53 @@ async def search_match_info(match_name: str, sport: str) -> str:
                 f"[WARNING] ⚠️ Tavily недоступен ({str(e)}). Переключаюсь на резервный поиск..."
             )
 
-    # Попытка 2: Если Tavily выдал ошибку 403 или ничего не нашёл — включаем резервный поиск
     if len(info.strip()) < 100:
         info = await fallback_free_search(match_name, sport)
 
     return info if info.strip() else "Свежих новостей в ленте мало, используй общую статистику команд."
+
+
+def get_working_models() -> list:
+    """Автоматически запрашивает у Groq список доступных для вашего ключа текстовых моделей"""
+    preferred = [
+        "openai/gpt-oss-20b",
+        "openai/gpt-oss-120b",
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "qwen/qwen3-32b",
+        "deepseek-r1-distill-llama-70b",
+    ]
+    try:
+        models_data = groq_client.models.list()
+        server_models = []
+        for m in models_data.data:
+            m_id = m.id
+            # Отсеиваем модели озвучки и модерации, оставляем только текстовые чаты
+            if not any(
+                skip in m_id.lower()
+                for skip in [
+                    "whisper",
+                    "guard",
+                    "tts",
+                    "orpheus",
+                    "playai",
+                    "embed",
+                ]
+            ):
+                server_models.append(m_id)
+
+        print(f"[INFO] 📋 Доступные модели на вашем ключе: {server_models}")
+
+        # Сначала ставим приоритетные (если они доступны), затем все остальные с сервера
+        final_list = [m for m in preferred if m in server_models]
+        for m in server_models:
+            if m not in final_list:
+                final_list.append(m)
+
+        return final_list if final_list else preferred
+    except Exception as e:
+        print(f"[WARNING] Не удалось запросить список моделей: {e}")
+        return preferred
 
 
 async def generate_analysis(
@@ -145,18 +186,18 @@ async def generate_analysis(
 ) -> str:
     """Генерация аналитической сводки через Groq"""
     if sport == "ММА":
-        section_name = "🥊 **Бой**"
-        form_section = """📊 **Анализ бойцов**:
+        section_name = "🥊 Бой"
+        form_section = """📊 Анализ бойцов:
 - Боец 1: [анализ формы, стиль, сильные стороны]
 - Боец 2: [анализ формы, стиль, сильные стороны]"""
-        injuries_section = """🤕 **Состояние и весогонка**:
-- [состояние бойцов, форма перед боем]"""
+        injuries_section = """🤕 Состояние и форма:
+- [состояние бойцов перед боем]"""
     else:
-        section_name = "🏆 **Матч**"
-        form_section = """📊 **Анализ формы команд**:
+        section_name = "🏆 Матч"
+        form_section = """📊 Анализ формы команд:
 - Команда 1: [анализ текущей игры]
 - Команда 2: [анализ текущей игры]"""
-        injuries_section = """🤕 **Кадровые потери и состав**:
+        injuries_section = """🤕 Кадровые потери и состав:
 - [информация о составах и травмах]"""
 
     prompt = f"""
@@ -188,12 +229,7 @@ async def generate_analysis(
 Важно: Пиши кратко, уверенно, без повторов, по существу.
 """
 
-    models_to_try = [
-        "llama-3.3-70b-versatile",
-        "llama-3.1-8b-instant",
-        "llama3-70b-8192",
-        "gemma2-9b-it",
-    ]
+    models_to_try = get_working_models()
 
     last_error = ""
     for model_name in models_to_try:
@@ -211,13 +247,19 @@ async def generate_analysis(
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.5,
-                max_tokens=1000,
+                max_tokens=2000,
             )
-            result = response.choices[0].message.content
-            print(
-                f"[INFO] ✅ Анализ сгенерирован ({model_name}): {len(result)} символов"
-            )
-            return result
+            result = response.choices[0].message.content or ""
+            # Убираем технические теги размышлений <think>, если они есть
+            result = re.sub(
+                r"<think>.*?</think>", "", result, flags=re.DOTALL
+            ).strip()
+
+            if result:
+                print(
+                    f"[INFO] ✅ Анализ сгенерирован ({model_name}): {len(result)} символов"
+                )
+                return result
         except Exception as e:
             last_error = str(e)
             print(f"[WARNING] ⚠️ Модель {model_name} не сработала: {last_error}")
@@ -249,59 +291,4 @@ async def handle_message(message: types.Message):
         "⚽ Футбол": ("футбол", "Арсенал - Челси"),
         "🏒 Хоккей": ("хоккей", "ЦСКА - Ак Барс"),
         "🏐 Волейбол": ("волейбол", "Зенит - Динамо"),
-        "🎮 Киберспорт": ("киберспорт", "Team Spirit - Team Liquid"),
-        "🏀 Баскетбол": ("баскетбол", "Лейкерс - Уорриорз"),
-        "🎾 Теннис": ("теннис", "Джокович - Алькарас"),
-        "🥊 ММА": ("ММА", "Конор Макгрегор - Хабиб Нурмагомедов"),
-    }
-
-    if text in sports:
-        selected_sport, example = sports[text]
-        user_sports[user_id] = selected_sport
-        await message.answer(
-            f"✅ Выбран вид спорта: {text}\n\n"
-            f'📌 Теперь отправь название матча/боя (например: "{example}")'
-        )
-        return
-
-    if user_sports.get(user_id) is None:
-        await message.answer(
-            "⚠️ Сначала выбери вид спорта с помощью кнопок ниже!",
-            reply_markup=sport_keyboard,
-        )
-        return
-
-    match_name = text
-    selected_sport = user_sports[user_id]
-
-    status_message = await message.answer(
-        f"🔍 Ищу информацию о матче: {match_name} ({selected_sport})...\n"
-        f"⏳ Это может занять 15-30 секунд."
-    )
-
-    try:
-        await status_message.edit_text("📰 Поиск новостей и статистики...")
-        search_info = await search_match_info(match_name, selected_sport)
-
-        await status_message.edit_text("🤖 Генерация аналитической сводки...")
-        analysis = await generate_analysis(
-            match_name, search_info, selected_sport
-        )
-
-        await status_message.edit_text("✅ Готово!")
-        await message.answer(analysis)
-    except Exception as e:
-        print(f"[ERROR] ❌ Ошибка в обработчике: {str(e)}")
-        await status_message.edit_text(
-            f"❌ Произошла ошибка: {str(e)}\n\nПопробуй позже."
-        )
-
-
-async def main():
-    """Запуск бота"""
-    print("🚀 ЗАПУСК БОТА ДЛЯ АНАЛИТИКИ СПОРТИВНЫХ МАТЧЕЙ")
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        "🎮 Киберспорт": ("киберспорт", "Team 
